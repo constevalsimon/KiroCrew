@@ -889,6 +889,11 @@ class TestTheSubscriberInstallAndIsolation:
         # subscriber still ran AFTER the sibling raised.
         _publish(1, {})
         _publish(2, {"user": 1})
+        # The bus also counts the sibling's exception (``bus.subscriber_error``), but
+        # only when the crew log health module is already loaded, which depends on
+        # which tests ran first in this process. That counter is the bus's own, not
+        # this subscriber's, so it is left out of the comparison.
+        recorded[:] = [r for r in recorded if r[0] != "kirocrew.crew_log.bus.subscriber_error"]
         assert recorded == [
             (export.TURN_STARTED_METRIC, 1, {"actor": "user", "agent_kind": "worker"})
         ]
