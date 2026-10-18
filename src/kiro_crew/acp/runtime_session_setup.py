@@ -719,20 +719,22 @@ async def _unpooled_control_planes(
     if self.acp_backend == ACP_BACKEND_KIRO:
         from kiro_crew.acp.session_mcp import kiro_control_plane_servers
 
+        # The spec kiro-cli runs: a launch copy for this runtime's own agent,
+        # read by the copy's name, never through a view built by a name lookup
+        # that could reach the checkout's same-named spec.
+        spec_agent = self._wire_mode_id(agent or self._agent)
         projection = getattr(self, "_native_skill_projection", None)
         projection_kwargs: dict[str, Any] = (
-            {"spec_override": projection.specs.get(agent or self._agent)}
-            if projection is not None
-            else {}
+            {"spec_override": projection.specs.get(spec_agent)} if projection is not None else {}
         )
         mount = await asyncio.to_thread(
             kiro_control_plane_servers,
-            agent,
+            spec_agent if spec_agent != (agent or self._agent) else agent,
             work_dir=work_dir,
             existing_names={str(entry.get("name")) for entry in entries},
             **projection_kwargs,
         )
-        name = agent or self._agent
+        name = spec_agent
         if (
             projection is not None
             and name in projection.search_agents

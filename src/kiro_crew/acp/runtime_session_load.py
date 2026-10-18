@@ -141,7 +141,7 @@ async def load_session(
         pooled, ref_spec = await asyncio.to_thread(
             _pooled_session_servers_and_ref_spec,
             self._mcp_gateway_overlay,
-            active_agent,
+            self._wire_mode_id(active_agent),
             self.acp_backend,
             session_work_dir,
         )
@@ -391,7 +391,11 @@ async def load_session(
     mode_agent = agent if self._activates_agent_by_mode() else None
     # Guard (C) -- see create_session: advertised, but as the host's own.
     # Same wire id as create_session: the batch this load re-sent was renamed.
-    mode_wire = kas_wire_agent_id(mode_agent) if mode_agent and kas_agents else mode_agent
+    mode_wire = (
+        kas_wire_agent_id(mode_agent)
+        if mode_agent and kas_agents
+        else self._wire_mode_id(mode_agent)
+    )
     refusal = self._harness.activation_refusal(mode_wire, resp) if mode_wire else None
     if refusal:
         await self.terminate_session(resume_sid)
