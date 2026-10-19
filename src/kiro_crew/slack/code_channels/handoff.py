@@ -56,10 +56,15 @@ CONFIRM_TEXT = (
     "task when you message it. You can turn it off again in Settings → Channels → "
     "Slack → Code channels."
 )
-DONE_TEXT = "Hand-off is on. Ask again or say retry."
-NOT_OWNER_TEXT = "⛔ Only the owner can turn on hand-off."
-NOT_ALLOWED_TEXT = "⛔ You can't change hand-off from this channel."
+DONE_TEXT = "Hand-off is on. Send your request again."
+NOT_OWNER_TEXT = ":no_entry: Only the owner can turn on hand-off."
+NOT_ALLOWED_TEXT = ":no_entry: You can't change hand-off from this channel."
 FAILED_TEXT = "I couldn't turn on hand-off: {reason}"
+PINNED_TEXT = (
+    "Hand-off can't be turned on from here: `{path}` sets it "
+    "(slack.code_channel_dispatch) and overrides this button. Change it in that "
+    "file, then ask the conductor again."
+)
 STALE_TEXT = (
     "That notice is out of date, so it can't change the setting. Ask the conductor "
     "again, or use Settings → Channels → Slack → Code channels."
@@ -114,6 +119,29 @@ def done_blocks() -> list[dict[str, Any]]:
     return [
         {"type": "section", "text": {"type": "mrkdwn", "text": f":white_check_mark: {DONE_TEXT}"}}
     ]
+
+
+def pinned_blocks(text: str) -> list[dict[str, Any]]:
+    """The notice once a click found ``config.local.json`` pinning the switch: no button."""
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": NOTICE_TEXT}},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": text}]},
+    ]
+
+
+async def _overlay_pin_path() -> str:
+    """``config.local.json``'s path (home as ``~``) when it pins the switch, else ``""``."""
+    try:
+        from kiro_crew.dashboard.slack_code_settings import (
+            _dispatch_overlay_state,
+            _overlay_display_path,
+        )
+
+        if await asyncio.to_thread(_dispatch_overlay_state) != "pinned":
+            return ""
+        return _overlay_display_path()
+    except Exception:
+        return ""
 
 
 def forget(channel_id: str) -> None:
@@ -300,10 +328,35 @@ async def handle_handoff_click(orch: Any, payload: dict[str, Any]) -> bool:
             await _ephemeral(channel, user, STALE_TEXT)
             return True
         _noticed[channel] = _USED
-        refusal = await save_code_channel_dispatch(
-            surface.dashboard_state(), value=True, caller=user, source="slack"
-        )
+        try:
+            refusal = await save_code_channel_dispatch(
+                surface.dashboard_state(), value=True, caller=user, source="slack"
+            )
+        except Exception:
+            # Not a decision: the button must not die with it.
+            logger.warning("code channel %s: hand-off save failed", channel, exc_info=True)
+            refusal = "the setting could not be saved"
         if refusal:
+            pinned_at = await _overlay_pin_path()
+            if pinned_at:
+                # The button can only fail again until that file changes: swap it
+                # for where the setting lives (the switch stays off).
+                surface.audit(user, OPERATION, "error", resources, refusal)
+                text = PINNED_TEXT.format(path=pinned_at)
+                # Said once: on the notice itself, or privately when it cannot be edited.
+                slack = surface.slack()
+                shown = False
+                if slack is not None and msg_ts:
+                    try:
+                        await slack.update_message(channel, msg_ts, text, pinned_blocks(text))
+                        shown = True
+                    except Exception:
+                        logger.warning(
+                            "code channel %s: hand-off notice not updated", channel, exc_info=True
+                        )
+                if not shown:
+                    await _ephemeral(channel, user, text)
+                return True
             _noticed[channel] = msg_ts  # nothing changed: the notice still stands
             surface.audit(user, OPERATION, "error", resources, refusal)
             await _ephemeral(channel, user, FAILED_TEXT.format(reason=refusal))
