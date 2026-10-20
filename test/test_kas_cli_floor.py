@@ -250,3 +250,150 @@ class TestGatewayBootDoesNotWaitForTheFloor:
         with caplog.at_level(logging.WARNING):
             asyncio.run(_boot())
         assert "KAS kiro-cli floor check failed" in caplog.text
+
+
+class TestDefaultNoticeWording:
+    """A host that never chose KAS is not told it did."""
+
+    def test_defaulted_kas_is_named_the_default(self, monkeypatch, pinned_cli, kas_selectable):
+        _help(monkeypatch, _OLD_HELP)
+        monkeypatch.setattr(bootstrap, "_kas_was_chosen", lambda agent, kas: False)
+        notice = bootstrap.apply_kas_cli_floor(_cfg())
+        assert notice is not None
+        assert notice.startswith("KAS is the default backend, but ")
+
+    def test_chosen_kas_keeps_the_selected_wording(self, monkeypatch, pinned_cli, kas_selectable):
+        _help(monkeypatch, _OLD_HELP)
+        monkeypatch.setattr(bootstrap, "_kas_was_chosen", lambda agent, kas: True)
+        notice = bootstrap.apply_kas_cli_floor(_cfg())
+        assert notice is not None
+        assert notice.startswith("KAS is selected, but ")
+
+
+class TestSpawnWaitsForADefaultedFloor:
+    """A spawn racing the floor on a defaulted KAS waits for its verdict."""
+
+    @pytest.fixture(autouse=True)
+    def _disarm(self):
+        from kiro_crew.agent_sdk import kas_floor_wait
+
+        kas_floor_wait.disarm_kas_floor_wait()
+        yield
+        kas_floor_wait.disarm_kas_floor_wait()
+
+    @staticmethod
+    def _gated_floor(monkeypatch, *, declared):
+        """A real floor on an old kiro-cli whose verdict waits on the returned event."""
+        from kiro_crew.config import loader
+        from kiro_crew.slack import gateway
+
+        release = threading.Event()
+
+        def _floor(cfg):
+            release.wait(5)
+            return bootstrap.apply_kas_cli_floor(cfg)
+
+        monkeypatch.setattr(loader, "acp_backend_declared", lambda: declared)
+        monkeypatch.setattr(loader, "member_acp_backend_declared", lambda: declared)
+        monkeypatch.setattr(gateway, "apply_kas_cli_floor", _floor)
+        monkeypatch.setattr(gateway, "_KAS_CLI_FLOOR_TASK", None)
+        return gateway, release
+
+    @staticmethod
+    async def _spawn(cfg, key="dashboard:chat"):
+        """What a spawn path does: wait at the gate for its role, then pick the backend."""
+        from kiro_crew.agent_sdk.kas_floor_wait import await_kas_floor_verdict
+        from kiro_crew.members import is_member_session_key, select_provider_backend
+
+        await await_kas_floor_verdict(member=is_member_session_key(key))
+        return select_provider_backend(key, cfg.agent.member_acp_backend, cfg.agent.acp_backend)
+
+    def test_spawn_before_the_verdict_waits_and_lands_on_kiro_cli(
+        self, monkeypatch, pinned_cli, kas_selectable
+    ):
+        _help(monkeypatch, _OLD_HELP)
+        gateway, release = self._gated_floor(monkeypatch, declared=False)
+        cfg = _cfg()
+
+        async def _run():
+            floor = gateway._start_kas_cli_floor(cfg)
+            spawn = asyncio.create_task(self._spawn(cfg))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert not spawn.done(), "the spawn went ahead before the floor's verdict"
+            release.set()
+            await floor
+            return await spawn
+
+        assert asyncio.run(_run()) == KIRO
+
+    def test_member_dm_on_a_defaulted_member_backend_waits_and_main_does_not(
+        self, monkeypatch, pinned_cli, kas_selectable
+    ):
+        from kiro_crew.members import DM_SLOT_KEY_PREFIX
+
+        _help(monkeypatch, _OLD_HELP)
+        gateway, release = self._gated_floor(monkeypatch, declared=False)
+        cfg = _cfg(acp_backend=KIRO, member_acp_backend=KAS)
+        dm_key = f"dashboard:{DM_SLOT_KEY_PREFIX}helper"
+
+        async def _run():
+            floor = gateway._start_kas_cli_floor(cfg)
+            member = asyncio.create_task(self._spawn(cfg, dm_key))
+            main = asyncio.create_task(self._spawn(cfg))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert not member.done(), "the member DM went ahead before the floor's verdict"
+            # The main role runs kiro-cli, so its spawn is not held by the floor.
+            assert main.done()
+            release.set()
+            await floor
+            return main.result(), await member
+
+        assert asyncio.run(_run()) == (KIRO, KIRO)
+
+    def test_explicit_kas_does_not_wait(self, monkeypatch, pinned_cli, kas_selectable):
+        _help(monkeypatch, _OLD_HELP)
+        gateway, release = self._gated_floor(monkeypatch, declared=True)
+        cfg = _cfg()
+
+        async def _run():
+            floor = gateway._start_kas_cli_floor(cfg)
+            try:
+                # Completes while the floor is still blocked: no wait was armed.
+                backend = await asyncio.wait_for(self._spawn(cfg), timeout=5)
+                assert not floor.done()
+                return backend
+            finally:
+                release.set()
+                await floor
+
+        assert asyncio.run(_run()) == KAS
+
+    def test_a_landed_verdict_costs_no_wait(self):
+        from kiro_crew.agent_sdk import kas_floor_wait
+
+        async def _run():
+            verdict = asyncio.get_running_loop().create_future()
+            verdict.set_result(None)
+            kas_floor_wait.arm_kas_floor_wait(verdict, main=True, member=False)
+            waiter = asyncio.create_task(kas_floor_wait.await_kas_floor_verdict())
+            await asyncio.sleep(0)
+            assert waiter.done()
+
+        asyncio.run(_run())
+
+    def test_the_wait_is_bounded_by_the_probe_timeout(self, monkeypatch):
+        from kiro_crew.agent_sdk import kas_floor_wait
+
+        assert kas_floor_wait.KAS_FLOOR_WAIT_SECS == kiro_cli._KAS_HELP_PROBE_TIMEOUT_SECS
+        monkeypatch.setattr(kas_floor_wait, "KAS_FLOOR_WAIT_SECS", 0.0)
+
+        async def _run():
+            verdict = asyncio.get_running_loop().create_future()
+            kas_floor_wait.arm_kas_floor_wait(verdict, main=True, member=False)
+            # Past its deadline: returns at once, and leaves the verdict running.
+            await asyncio.wait_for(kas_floor_wait.await_kas_floor_verdict(), timeout=5)
+            assert not verdict.done()
+
+        asyncio.run(_run())

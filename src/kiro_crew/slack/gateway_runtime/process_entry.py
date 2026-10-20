@@ -194,8 +194,15 @@ def _start_kas_cli_floor(cfg: KiroCrewConfig) -> "asyncio.Task[None]":
     the gateway binds without waiting for it. Until it lands, a configured KAS
     stays selected, which is also what a check that cannot run leaves. Failure is
     logged and contained: the backend stays as configured.
+
+    When KAS is only the DEFAULT (no ``agent.acp_backend`` or no
+    ``agent.member_acp_backend`` stored), the task also arms
+    :mod:`kiro_crew.agent_sdk.kas_floor_wait` for that role, so a session spawned
+    before the verdict waits for it (bounded) instead of starting KAS on a
+    kiro-cli that rejects it. Boot itself still never waits.
     """
     global _KAS_CLI_FLOOR_TASK
+    from kiro_crew.agent_sdk import kas_floor_wait
 
     async def _run() -> None:
         try:
@@ -205,8 +212,38 @@ def _start_kas_cli_floor(cfg: KiroCrewConfig) -> "asyncio.Task[None]":
                 "KAS kiro-cli floor check failed; continuing", exc_info=True
             )
 
+    main, member = _kas_floor_gates_spawns(cfg)
     _KAS_CLI_FLOOR_TASK = asyncio.create_task(_run(), name="kas-cli-floor")
+    kas_floor_wait.arm_kas_floor_wait(_KAS_CLI_FLOOR_TASK, main=main, member=member)
     return _KAS_CLI_FLOOR_TASK
+
+
+def _kas_floor_gates_spawns(cfg: KiroCrewConfig) -> tuple[bool, bool]:
+    """Whether main and member spawns wait for the floor: their KAS is a default.
+
+    An explicit backend choice never gates its role, and the bundle route, which
+    the floor never probes, gates neither. A config that cannot be read answers
+    "no gate": the spawn then behaves as it did before the gate existed.
+    """
+    from kiro_crew.acp_backends import ACP_BACKEND_KAS
+
+    agent = getattr(cfg, "agent", None)
+    if getattr(agent, "kas_bundle", False):
+        return False, False
+    kas_main = getattr(agent, "acp_backend", None) == ACP_BACKEND_KAS
+    kas_member = getattr(agent, "member_acp_backend", None) == ACP_BACKEND_KAS
+    if not (kas_main or kas_member):
+        return False, False
+    try:
+        from kiro_crew.config.loader import acp_backend_declared, member_acp_backend_declared
+
+        return (
+            kas_main and not acp_backend_declared(),
+            kas_member and not member_acp_backend_declared(),
+        )
+    except Exception:
+        logging.getLogger(__name__).debug("backend declared-check failed", exc_info=True)
+        return False, False
 
 
 async def run_gateway(
