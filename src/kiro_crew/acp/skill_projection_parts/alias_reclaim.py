@@ -32,6 +32,7 @@ from typing import Any
 from kiro_crew import pinned_fs, platform_compat
 from kiro_crew.acp.skill_projection_parts.native_projection import _active_aliases
 from kiro_crew.acp.skill_projection_parts.side_files import (
+    _EXPLICIT_RELEASE,
     _LEGACY_ALIAS_NAME_RE,
     _PINNED_SIDE_DIR,
     _PROJECTION_LEASE_MAX_BYTES,
@@ -243,6 +244,10 @@ def _reap_collected_projections() -> None:
             logger.warning("skill projection: ending a collected projection failed", exc_info=True)
 
 
+# Set only for the duration of an EXPLICIT :meth:`NativeSkillProjection.release`
+# call (see :data:`side_files._EXPLICIT_RELEASE`). It tells :func:`_end_projection`
+# it was reached from a known-safe call site rather than fired by the weakref/GC
+# machinery, so off the loop it may run the end inline; a finalizer never does.
 def _end_projection(
     lease_stack: ExitStack, directory: Path, crew_home_id: str, side_dir: Path
 ) -> None:
@@ -251,10 +256,21 @@ def _end_projection(
     Called by :meth:`NativeSkillProjection.release` (the client's shutdown path
     calls that on the event-loop thread) or, for a projection that was merely
     dropped, when its last reference goes or the cyclic collector frees it.
-    Inside a collection nothing runs here: the end is queued for the reaper
-    thread (:data:`_COLLECTING_THREAD` says why). Otherwise, off the loop the
-    whole sequence runs inline. On the loop ALL of it goes to a daemon
-    thread: the prune waits on a file lock (up to the publication lock's
+
+    A finalizer fires on whichever thread last dropped the reference, at that
+    point in its code -- possibly deep inside a non-reentrant stdlib lock (a
+    ``ThreadPoolExecutor.submit`` holding ``_global_shutdown_lock`` while it
+    constructs the ``Future`` whose allocation freed this projection). The end
+    takes locks and calls the path-resolution subprocess pool, whose bounded
+    request re-enters that same executor, so run inline there it waits on a lock
+    its own thread already holds -- forever, until the test timeout kills the
+    xdist worker. Two drop paths reach here that way: the cyclic collector (which
+    sets :data:`_COLLECTING_THREAD`) AND a plain refcount-zero finalize (which
+    does not). Both are handled by never running the end inline when we were not
+    reached from an explicit ``release`` (:data:`_EXPLICIT_RELEASE`): off the
+    loop it is queued for the reaper thread, which owns a context with no such
+    lock held. On the loop ALL of it -- release and finalizer alike -- goes to a
+    daemon thread: the prune waits on a file lock (up to the publication lock's
     ceiling), and the lease release itself unlocks and closes the holder, then
     stats, opens and unlinks two files -- blocking calls whose cost on a slow or
     network-homed data home would stall every session the gateway serves. A
@@ -262,6 +278,7 @@ def _end_projection(
     inline, the two unlinks the finalizer always did, and drops the prune: the
     next spawn's prune covers it.
     """
+    explicit = getattr(_EXPLICIT_RELEASE, "active", False)
     if _COLLECTING_THREAD == threading.get_ident():
         _COLLECTED_ENDS.put(
             functools.partial(
@@ -281,6 +298,19 @@ def _end_projection(
         except RuntimeError:
             logger.debug("skill projection: lease release thread not started", exc_info=True)
         lease_stack.close()
+        return
+    if not explicit:
+        # A finalizer fired off the loop (a refcount-zero drop, not reached
+        # through ``release``): the thread that dropped the last reference may be
+        # inside a non-reentrant lock, so the end must not run inline here. Hand
+        # it to the reaper, which runs in a context holding none of those locks.
+        # ``SimpleQueue.put`` is reentrant and safe from inside a collection too,
+        # so this also covers a collection the gc-callback hook did not flag.
+        _COLLECTED_ENDS.put(
+            functools.partial(
+                _end_projection_off_loop, lease_stack, side_dir, directory, crew_home_id
+            )
+        )
         return
     _end_projection_off_loop(lease_stack, side_dir, directory, crew_home_id)
 

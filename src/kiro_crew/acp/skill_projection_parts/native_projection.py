@@ -16,7 +16,7 @@ import weakref
 from dataclasses import dataclass, field
 from typing import Any
 
-from kiro_crew.acp.skill_projection_parts.side_files import _LEGACY_ALIAS_NAME_RE
+from kiro_crew.acp.skill_projection_parts.side_files import _EXPLICIT_RELEASE, _LEGACY_ALIAS_NAME_RE
 from kiro_crew.acp.skill_projection_parts.view_sources import (
     RetiredSkillView,
     _admissible_source_agent,
@@ -272,8 +272,17 @@ class NativeSkillProjection:
         with _ACTIVE_PROJECTIONS_LOCK:
             _ACTIVE_PROJECTIONS.pop(id(self), None)
         if finalizer is not None and finalizer.alive:
-            # Runs ``_end_projection`` once, now, and detaches it from GC.
-            finalizer()
+            # Runs ``_end_projection`` once, now, and detaches it from GC. The
+            # flag marks this as an EXPLICIT release from a known-safe call site:
+            # off the event loop _end_projection may then run the end inline. A
+            # finalizer fired by GC/refcount carries no such flag and is never
+            # run inline off the loop, because it can land inside a non-reentrant
+            # lock. See :func:`_end_projection`.
+            _EXPLICIT_RELEASE.active = True
+            try:
+                finalizer()
+            finally:
+                _EXPLICIT_RELEASE.active = False
 
 
 _ACTIVE_PROJECTIONS: weakref.WeakValueDictionary[int, NativeSkillProjection] = (

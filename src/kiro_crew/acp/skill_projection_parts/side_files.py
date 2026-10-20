@@ -33,6 +33,18 @@ from kiro_crew.config.paths import data_home
 logger = logging.getLogger("kiro_crew.acp.skill_projection")
 
 
+# Set only for the duration of an EXPLICIT ``NativeSkillProjection.release`` call,
+# on the releasing thread. It tells ``_end_projection`` (in ``alias_reclaim``) that
+# it was reached from a known-safe call site rather than fired by the weakref/GC
+# machinery, so off the event loop it may run the projection end inline. A
+# finalizer -- a refcount-zero drop or a cyclic collection -- carries no such flag
+# and is never run inline off the loop, because it can fire on a thread that is
+# inside a non-reentrant lock the end's own path re-enters. It lives HERE, the
+# first-loaded owner, so both ``native_projection`` (which sets it) and
+# ``alias_reclaim`` (which reads it) import it forward.
+_EXPLICIT_RELEASE = threading.local()
+
+
 # The projection's SIDE FILES -- the publication lock, the per-process lease
 # records and the ownership sidecars -- live under Kiro Crew's own data home,
 # NOT beside the views in the shared ``~/.kiro/agents/`` directory. Only the

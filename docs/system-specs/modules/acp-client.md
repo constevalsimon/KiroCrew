@@ -847,12 +847,17 @@ directory at once instead of waiting for the next spawn. The eager prune never
 queues behind this process's own in-process lock (a start holding it runs its
 own prune), and when the end runs on an event-loop thread the lease release and
 the prune both go to a daemon thread, so no session start is stalled behind a
-file-lock wait. A finalizer the cyclic collector runs does none of that work on
-the collecting thread: the collector fires on whatever thread allocated, possibly
-inside a non-reentrant lock such as a `ThreadPoolExecutor.submit` lock the prune's
-own path checks need, so the end is only queued (`SimpleQueue`, safe inside a
-collection) for one daemon reaper thread started when the finalizer is armed. A
-`gc.callbacks` hook records which thread is collecting. Pruning runs ONE bounded lease scan for the whole
+file-lock wait. A finalizer that fires for a dropped projection -- whether the
+cyclic collector freed it OR its last reference simply went -- does none of that
+work on the thread that triggered it: that thread fires on whatever allocated at
+that point, possibly inside a non-reentrant lock such as a
+`ThreadPoolExecutor.submit` lock the prune's own path checks need, so the end is
+only queued (`SimpleQueue`, safe inside a collection) for one daemon reaper thread
+started when the finalizer is armed. Only an EXPLICIT `release()` off the loop runs
+the end inline, because it is reached from a known-safe call site; the finalizer
+path never does, since a refcount-zero drop runs inline on the dropping thread with
+no `gc.callbacks` collection to flag it. A `gc.callbacks` hook records which thread
+is collecting, so a collection the drop happens inside is caught as well. Pruning runs ONE bounded lease scan for the whole
 run -- not one scan per candidate, which multiplied the candidate cap by the
 scan cap into a quadratic sweep under the held publication lock -- streaming lease
 records without materializing the directory and stopping at a fixed scan ceiling.

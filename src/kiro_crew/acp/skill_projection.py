@@ -119,6 +119,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         prepare_native_skill_projection,
     )
     from kiro_crew.acp.skill_projection_parts.side_files import (  # noqa: F401
+        _EXPLICIT_RELEASE,
         _IN_PROCESS_PROJECTION_LOCKS,
         _IN_PROCESS_PROJECTION_LOCKS_GUARD,
         _IN_PROCESS_PROJECTION_WAIT_SECS,
