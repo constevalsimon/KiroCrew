@@ -33,6 +33,7 @@ import CrewDashboardTab from './CrewDashboardTab'
 import { isDashboardPreview, withoutDashboardPreview } from './dashboardPreview'
 import { claimDashboardOnLoad } from './dashboardOnLoad'
 import { suggestPaneDraft } from '../../utils/chatPaneDrafts'
+import { sendCardReply } from './sendCardReply'
 import { revealComposer } from '../chat/composerFocus'
 import { sessionTitleRoster } from '../../utils/sessionRoster'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -566,6 +567,9 @@ export function MembersPageSidePanel({
           // chat box; the person sends it. The composer is revealed (focused on
           // desktop) so the result of the click is where the reader looks.
           onAct={activeSlot ? (text: string) => { suggestPaneDraft(activeSlot, text); revealComposer() } : undefined}
+          // One click sends it into THIS crewmate's thread (the slot this tab confirmed),
+          // never a target the page names; a refusal falls back to the line above.
+          onSend={activeSlot ? (text: string) => sendCardReply(activeSlot, text) : undefined}
           // Badge click opens the Profile tab directly so the person can unlock.
           // Guard against an unsaved schedule form in the already-open card:
           // openProfile() increments the nonce which re-mounts the panel.

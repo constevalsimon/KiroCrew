@@ -76,25 +76,52 @@ const READY_MESSAGE_TYPE = 'kirocrew-dashboard:ready'
 
 /** A page's request to put a reply in the chat box: `{ type, text }`.
  *
- * The page is crewmate-written HTML, so it never SENDS anything: the host only
- * fills the composer, and the person presses send. That is the whole safety
- * line -- a page that could send would be a page that could speak as the user. */
+ * The page is crewmate-written HTML, so `act` never SENDS anything: the host only
+ * fills the composer, and the person presses send. */
 const ACT_MESSAGE_TYPE = 'kirocrew-dashboard:act'
+/** A page's request to SEND a reply into this crewmate's own thread: `{ type, text }`,
+ *  the same text rules as `act`. Still only a request. The host sends it only when
+ *  a real click inside the page happened in the last few seconds, only into the
+ *  thread of the tab the page is shown in (the page names no target), at most once
+ *  per `SEND_MIN_INTERVAL_MS`, and the gateway can refuse (the Profile switch is
+ *  off, the thread is busy or waiting on an approval or a question). Any refusal
+ *  falls back to `act`, so a reply is never lost. Mirrors `dashboard_frame.SEND_MESSAGE_TYPE`. */
+const SEND_MESSAGE_TYPE = 'kirocrew-dashboard:send'
+/** The least time between two sends from one tab. The gateway enforces its own. */
+const SEND_MIN_INTERVAL_MS = 3000
 /** What the page posts when it cannot place a patch in order. Mirrors
  *  `dashboard_frame.REFETCH_MESSAGE_TYPE`. */
 const REFETCH_MESSAGE_TYPE = 'kirocrew-dashboard:refetch'
 /** Longest reply a page may put in the composer. Longer is refused, not cut. */
 const ACT_MAX_CHARS = 600
 
-/** The text a page's act message may put in the composer, or null to refuse it. */
-export function actText(data: unknown): string | null {
+function replyText(data: unknown, type: string): string | null {
   if (!data || typeof data !== 'object') return null
   const msg = data as { type?: unknown; text?: unknown }
-  if (msg.type !== ACT_MESSAGE_TYPE || typeof msg.text !== 'string') return null
+  if (msg.type !== type || typeof msg.text !== 'string') return null
   const text = msg.text.trim()
   if (!text || text.length > ACT_MAX_CHARS) return null
   if (/[\u0000-\u0009\u000b-\u001f\u007f]/.test(text)) return null
   return text
+}
+
+/** The text a page's act message may put in the composer, or null to refuse it. */
+export function actText(data: unknown): string | null {
+  return replyText(data, ACT_MESSAGE_TYPE)
+}
+
+/** The text a page's send message may send, or null to refuse it. Same rules as `actText`. */
+export function sendText(data: unknown): string | null {
+  return replyText(data, SEND_MESSAGE_TYPE)
+}
+
+/** Whether the person clicked in this window (the page's frame included) within the
+ *  last few seconds. A script in the page can post a message at any time, but it
+ *  cannot make this true: the browser sets it from real input only. A browser
+ *  without the API reads as false, so `send` there behaves as `act`. */
+export function recentRealClick(): boolean {
+  if (typeof navigator === 'undefined') return false
+  return (navigator as { userActivation?: { isActive?: boolean } }).userActivation?.isActive === true
 }
 
 /**
@@ -243,13 +270,17 @@ export function dashboardQueryKey(target: DashboardTarget): readonly string[] {
     : [SESSION_DASHBOARD_QUERY_PREFIX, target.slot]
 }
 
-export default function CrewDynamicDashboard({ target, displayName, avatar, onAct, preview = false, onPreviewGone, onPreviewLoaded, onOpenProfileTab, dashboardSlug = '' }: {
+export default function CrewDynamicDashboard({ target, displayName, avatar, onAct, onSend, preview = false, onPreviewGone, onPreviewLoaded, onOpenProfileTab, dashboardSlug = '' }: {
   target: DashboardTarget
   displayName: string
   /** The crew record's `avatar` field, verbatim, for the suggestions page's face. */
   avatar?: unknown
   /** Put a reply the page offered into the chat box. Absent: the page's options do nothing. */
   onAct?: (text: string) => void
+  /** Send a reply the page offered into this crewmate's own thread. Resolves true when
+   *  it went (or may have), false when it was refused and the text should be filled
+   *  instead. Absent: a page's `send` behaves as `act`. */
+  onSend?: (text: string) => Promise<boolean>
   /** Render the STAGED page instead of the adopted one. Its own cache entry, so the
    *  live tab never shows a page nobody applied; still under the `member-dashboard`
    *  prefix, so the frame that says the page changed refetches it too. */
@@ -279,6 +310,10 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
   const [refetchPending, setRefetchPending] = useState(false)
   const onActRef = useRef(onAct)
   onActRef.current = onAct
+  const onSendRef = useRef(onSend)
+  onSendRef.current = onSend
+  const sendingRef = useRef(false)
+  const lastSendRef = useRef(0)
   // A pull request the page links to: this frame only, GitHub PR URLs only.
   useFrameOpenLink([frameRef])
   const { theme, colorTheme, themeVersion } = useTheme()
@@ -415,6 +450,23 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
       const text = actText(event.data)
       if (text && onActRef.current) {
         onActRef.current(text)
+        return
+      }
+      const reply = sendText(event.data)
+      if (reply) {
+        const fill = () => onActRef.current?.(reply)
+        const send = onSendRef.current
+        if (!send || !recentRealClick()) { fill(); return }
+        // A second message inside the interval, or while one is in flight, is dropped:
+        // a person's double click is one reply, and a script's burst is none.
+        const now = Date.now()
+        if (sendingRef.current || now - lastSendRef.current < SEND_MIN_INTERVAL_MS) return
+        sendingRef.current = true
+        lastSendRef.current = now
+        send(reply)
+          .then((went) => { if (!went) fill() })
+          .catch(fill)
+          .finally(() => { sendingRef.current = false })
         return
       }
       // THE GAP. The page applies patches in sequence and asks for the whole read
@@ -1270,4 +1322,4 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
   )
 }
 
-export { ACT_MESSAGE_TYPE, DATA_MESSAGE_TYPE, REFETCH_MESSAGE_TYPE, READY_MESSAGE_TYPE, READY_TIMEOUT_MS }
+export { ACT_MESSAGE_TYPE, SEND_MESSAGE_TYPE, SEND_MIN_INTERVAL_MS, DATA_MESSAGE_TYPE, REFETCH_MESSAGE_TYPE, READY_MESSAGE_TYPE, READY_TIMEOUT_MS }
