@@ -283,7 +283,9 @@ class _TaskqBridgeMixin(ManagerComponent):
         return True
 
     @staticmethod
-    def taskq_artifact_probe(rec: "_taskq.TaskRecord") -> str | None:
+    def taskq_artifact_probe(
+        rec: "_taskq.TaskRecord", claimed_at: float | None = None
+    ) -> str | None:
         """What a subagent run's artifacts prove about how it ended, if anything.
 
         A readable tombstone decides by its recorded ending, then its cause; an
@@ -296,6 +298,13 @@ class _TaskqBridgeMixin(ManagerComponent):
         a run began even when the row still says ``admitted``, and it is the
         same record the orphan reconcile reports the run from. No folder says
         nothing.
+
+        *claimed_at* is the time of the row's latest claim, given for a parked
+        ``retry_wait`` row (``reconcile.ArtifactProbe``). The folder is the row
+        id's and a claim reads no tombstone, so a row claimed again after its
+        ending was lost runs over the earlier attempt's tombstone; one that does
+        not record its ``died`` at or after *claimed_at* is that earlier
+        ending, or one it cannot place, and says nothing.
         """
         from kiro_crew import taskq as _taskq
         from kiro_crew.taskq.reconcile import STARTED
@@ -305,6 +314,7 @@ class _TaskqBridgeMixin(ManagerComponent):
         try:
             from kiro_crew.subagent_persistence import (
                 _agent_dir,
+                _finite_time,
                 _read_state_at,
                 _read_tombstone_at,
                 result_is_whole,
@@ -315,6 +325,8 @@ class _TaskqBridgeMixin(ManagerComponent):
             if tombstone is not None:
                 cause = str(tombstone.get("cause") or "")
                 if cause != "gateway_restart":
+                    if claimed_at is not None and _finite_time(tombstone.get("died")) < claimed_at:
+                        return None
                     return tombstone_terminal_state(cause, str(tombstone.get("outcome") or ""))
             elif present:
                 return None

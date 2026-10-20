@@ -1235,6 +1235,18 @@ whose cancel was dropped, with the tombstone already recording the stop — and
 `count_pending` keeps counting it, so without the pass the parent's
 attached-children guard answers `409 slot_subagents_running` on every turn.
 
+The pass asks `artifact_probe(row, claimed_at=...)` with the time of the row's
+latest `claimed` event (one `latest_events` read per page; a page whose claims
+cannot be read is named in `report.errors` and left alone). A claim reads no
+artifact and the run folder is the row id's, so a row whose ending was lost
+can be claimed and run again over the folder its earlier attempt ended in. The
+subagent probe therefore trusts a tombstone here only when its `died` is at or
+after `claimed_at`; an earlier one, or one with no usable `died`, says
+nothing, and the row stays its dispatcher's, as it would with no pass at all.
+A probe that does not take `claimed_at` raises there, which is recorded and
+settles nothing; with no `artifact_probe` the pass reads no row. The `ACTIVE`
+pass calls the probe without `claimed_at`, as before.
+
 ## Waits (`waits.py`)
 
 Every pause is a wait with a reason (SPEC-ADDENDUM §1-3, RFC §14.1-14.3).

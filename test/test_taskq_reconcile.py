@@ -326,22 +326,55 @@ def test_a_parent_end_or_stage_cancel_tombstone_settles_the_row_cancelled(
 # ── an unleased retry_wait row whose run already ended ────────────────────────
 
 
-def _park_released_start(path: Path, clock: Clock, task_id: str, *, session_key: str) -> int:
+def _park_released_start(
+    path: Path,
+    clock: Clock,
+    task_id: str,
+    *,
+    session_key: str,
+    tombstone: dict | None = None,
+    redispatch: bool = False,
+) -> int:
     """A start the claimer took and gave back: ``starting -> retry_wait``, no lease.
 
     The shape a dropped user stop leaves behind: the row is parked for a
-    re-dispatch while the run's own record already says how it ended. Returns
-    the row's generation after the park.
+    re-dispatch while the run's own record already says how it ended. With
+    *tombstone*, that record is written while the row is ``starting``, a second
+    after its claim, stamped ``died`` at that moment, as the stop's reap writes
+    it. *redispatch* then claims the row AGAIN a second later and gives that
+    start back too: a later attempt waiting for its own re-dispatch over the
+    earlier attempt's tombstone. Returns the row's generation after the last
+    park.
     """
+    import kiro_crew.subagent_persistence as sp
+
     s = TaskStore(path, clock=clock, network_fs=False).open()
     s.accept([_rec(task_id, session_key=session_key)])
-    g = s.claim(task_id).generation
-    s.transition(task_id, model.STARTING, generation=g)
-    assert s.transition(task_id, model.RETRY_WAIT, generation=g, next_run_at=None)
+    attempts = 2 if redispatch else 1
+    for attempt in range(attempts):
+        g = s.claim(task_id).generation
+        s.transition(task_id, model.STARTING, generation=g)
+        clock.t += 1
+        if tombstone is not None and attempt == 0:
+            _write_json(sp._agent_dir(task_id) / "tombstone.json", {**tombstone, "died": clock.t})
+        clock.t += 1
+        assert s.transition(task_id, model.RETRY_WAIT, generation=g, next_run_at=None)
     row = s.get(task_id)
     assert row.state == model.RETRY_WAIT and row.lease_owner is None
+    assert row.attempts == attempts
     s.close()
     return row.generation
+
+
+def _stopped_run_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, task_id: str
+) -> dict[str, str]:
+    """A subagent run folder under ``tmp_path/subagents``; returns the stop's tombstone."""
+    import kiro_crew.subagent_persistence as sp
+
+    monkeypatch.setattr(sp, "_SUBAGENTS_DIR", tmp_path / "subagents")
+    _write_json(tmp_path / "subagents" / task_id / "state.json", {"id": task_id, "task": "t"})
+    return {"cause": "user_stop", "outcome": "stopped"}
 
 
 def test_an_unleased_retry_wait_row_whose_run_was_stopped_is_cancelled_at_boot(
@@ -352,15 +385,11 @@ def test_an_unleased_retry_wait_row_whose_run_was_stopped_is_cancelled_at_boot(
     settles it ``cancelled``, so the parent's pending count (what the
     attached-children guard reads) drops to zero instead of answering 409 on
     every turn until someone edits the store by hand."""
-    import kiro_crew.subagent_persistence as sp
     from kiro_crew.subagent_manager.admission.taskq_bridge import _TaskqBridgeMixin
 
-    monkeypatch.setattr(sp, "_SUBAGENTS_DIR", tmp_path / "subagents")
-    folder = tmp_path / "subagents" / "rw000001"
-    _write_json(folder / "state.json", {"id": "rw000001", "task": "t"})
-    _write_json(folder / "tombstone.json", {"cause": "user_stop", "outcome": "stopped"})
+    stop = _stopped_run_folder(tmp_path, monkeypatch, "rw000001")
     path = tmp_path / "tasks.db"
-    _park_released_start(path, clock, "rw000001", session_key="parent-slot")
+    _park_released_start(path, clock, "rw000001", session_key="parent-slot", tombstone=stop)
     clock.t += 6 * 3600
 
     s = _crash_and_reopen(path, clock)
@@ -373,6 +402,93 @@ def test_an_unleased_retry_wait_row_whose_run_was_stopped_is_cancelled_at_boot(
         assert s.claim("rw000001") is None
     finally:
         s.close()
+
+
+def _open_as_the_gateway_does(home: Path) -> TaskStore:
+    """The store the subagent manager opens at boot (``taskq_open``), reconcile included."""
+    from types import SimpleNamespace
+
+    from kiro_crew.subagent_manager.admission.taskq_bridge import _TaskqBridgeMixin
+
+    bridge = SimpleNamespace(taskq_artifact_probe=_TaskqBridgeMixin.taskq_artifact_probe)
+    cfg = SimpleNamespace(
+        agent=SimpleNamespace(
+            task_queue_enabled=True, task_dispatch_window=8, task_store_journal_mode="delete"
+        )
+    )
+    store = _TaskqBridgeMixin.taskq_open(bridge, cfg, home=home)  # type: ignore[arg-type]
+    assert store is not None
+    return store
+
+
+@pytest.mark.parametrize(
+    "redispatch, expected",
+    [
+        # The reported shape: the stop is the latest attempt's ending.
+        (False, model.CANCELLED),
+        # The row was claimed and started again after that stop: the tombstone
+        # is the earlier attempt's, and the attempt now parked recorded no
+        # ending, so it stays its dispatcher's. Red before the attempt fence:
+        # the boot pass cancelled the later attempt on the earlier one's stop.
+        (True, model.RETRY_WAIT),
+    ],
+)
+def test_the_boot_pass_settles_a_parked_row_only_on_its_current_attempts_tombstone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: Clock, redispatch: bool, expected: str
+) -> None:
+    """Through the gateway's own boot open. The run folder is the row id's, and a
+    claim reads no tombstone, so a row whose stop was dropped is claimed and run
+    again over the earlier attempt's folder once nothing in memory remembers the
+    stop (a restart, a dismissed card)."""
+    home = tmp_path
+    stop = _stopped_run_folder(tmp_path, monkeypatch, "rw_again")
+    gen = _park_released_start(
+        TaskStore.default_path(home),
+        clock,
+        "rw_again",
+        session_key="parent-slot",
+        tombstone=stop,
+        redispatch=redispatch,
+    )
+    s = _open_as_the_gateway_does(home)
+    try:
+        row = s.get("rw_again")
+        assert row.state == expected
+        if expected == model.RETRY_WAIT:
+            assert row.generation == gen and row.lease_owner is None
+            assert s.count_pending(model.KIND_SUBAGENT, session_key="parent-slot") == 1
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize(
+    "died_offset, claimed, expected",
+    [
+        (+1.0, True, model.CANCELLED),  # written after the latest claim: this attempt's
+        (0.0, True, model.CANCELLED),  # the same instant still is
+        (-1.0, True, None),  # before it: an earlier attempt's ending
+        (None, True, None),  # no ``died``: cannot be placed, says nothing
+        (-1.0, False, model.CANCELLED),  # no claim given (the ACTIVE pass): as before
+    ],
+)
+def test_the_subagent_probe_places_a_tombstone_against_the_latest_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    died_offset: float | None,
+    claimed: bool,
+    expected: str | None,
+) -> None:
+    import kiro_crew.subagent_persistence as sp
+    from kiro_crew.subagent_manager.admission.taskq_bridge import _TaskqBridgeMixin
+
+    stop = _stopped_run_folder(tmp_path, monkeypatch, "rw_place")
+    claimed_at = 5000.0
+    if died_offset is not None:
+        stop["died"] = claimed_at + died_offset  # type: ignore[assignment]
+    _write_json(sp._agent_dir("rw_place") / "tombstone.json", stop)
+    rec = _rec("rw_place", state=model.RETRY_WAIT)
+    probe = _TaskqBridgeMixin.taskq_artifact_probe
+    assert probe(rec, claimed_at if claimed else None) == expected
 
 
 @pytest.mark.parametrize(
@@ -393,14 +509,42 @@ def test_an_unleased_retry_wait_row_settles_only_on_an_ending_its_state_accepts(
     tmp_path: Path, clock: Clock, verdict: str | None, expected: str
 ) -> None:
     path = tmp_path / "t.db"
+    claimed_at = clock.t
     gen = _park_released_start(path, clock, "rw000002", session_key="parent-slot")
+    asked: list[float | None] = []
+
+    def probe(rec: model.TaskRecord, claimed_at: float | None = None) -> str | None:
+        asked.append(claimed_at)
+        return verdict
+
     s = _crash_and_reopen(path, clock)
     try:
-        reconcile_on_boot(s, artifact_probe=lambda r: verdict)
+        reconcile_on_boot(s, artifact_probe=probe)
+        # Asked once, about the attempt the row's latest claim began.
+        assert asked == [claimed_at]
         row = s.get("rw000002")
         assert row.state == expected
         if expected == model.RETRY_WAIT:
             assert row.generation == gen and row.lease_owner is None
+    finally:
+        s.close()
+
+
+def test_a_probe_that_cannot_place_an_ending_in_time_settles_no_parked_row(
+    tmp_path: Path, clock: Clock
+) -> None:
+    """A probe that does not take ``claimed_at`` cannot say which attempt an
+    ending belongs to, so the pass names the row and leaves it; with no probe at
+    all it reads no parked row."""
+    path = tmp_path / "t.db"
+    gen = _park_released_start(path, clock, "rw_plain", session_key="p")
+    s = _crash_and_reopen(path, clock)
+    try:
+        assert reconcile_on_boot(s).parked_examined == 0
+        report = reconcile_on_boot(s, artifact_probe=lambda r: model.CANCELLED)
+        assert [e.split(":")[0] for e in report.errors] == ["rw_plain"]
+        row = s.get("rw_plain")
+        assert row.state == model.RETRY_WAIT and row.generation == gen
     finally:
         s.close()
 
@@ -412,7 +556,7 @@ def test_a_retry_wait_probe_that_raises_leaves_its_row_and_settles_the_rest(
     _park_released_start(path, clock, "rw_raise", session_key="p")
     _park_released_start(path, clock, "rw_stop", session_key="p")
 
-    def probe(rec: model.TaskRecord) -> str | None:
+    def probe(rec: model.TaskRecord, claimed_at: float | None = None) -> str | None:
         if rec.id == "rw_raise":
             raise OSError("tombstone directory is unreadable")
         return model.CANCELLED
@@ -423,6 +567,29 @@ def test_a_retry_wait_probe_that_raises_leaves_its_row_and_settles_the_rest(
         assert [e.split(":")[0] for e in report.errors] == ["rw_raise"]
         assert s.state_of("rw_raise") == model.RETRY_WAIT
         assert s.state_of("rw_stop") == model.CANCELLED
+    finally:
+        s.close()
+
+
+def test_a_retry_wait_row_whose_claims_cannot_be_read_is_named_and_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    """Without its latest claim the pass cannot tell which attempt a tombstone
+    ended, so it writes nothing for that row and names it for the boot log."""
+    path = tmp_path / "t.db"
+    gen = _park_released_start(path, clock, "rw_blind", session_key="p")
+    s = _crash_and_reopen(path, clock)
+
+    def unreadable(*_a: object, **_k: object) -> object:
+        raise TaskStoreUnavailable("database is locked")
+
+    monkeypatch.setattr(s, "latest_events", unreadable)
+    try:
+        report = reconcile_on_boot(s, artifact_probe=lambda r, claimed_at=None: model.CANCELLED)
+        assert [e.split(":")[0] for e in report.errors] == ["rw_blind"]
+        assert report.parked_examined == 0
+        row = s.get("rw_blind")
+        assert row.state == model.RETRY_WAIT and row.generation == gen
     finally:
         s.close()
 
