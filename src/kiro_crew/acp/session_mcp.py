@@ -1446,6 +1446,35 @@ class NativeSettingsUnreadable(ValueError):
         )
 
 
+class NativeRegistryCeiling:
+    """The per-session element is unavailable because the install is registry-governed.
+
+    Not a restriction a user authored against ONE server and not a file that
+    could not be read: it is the whole-install ``registry`` access mode, in which
+    kiro-cli resolves every managed ``mcpServers`` entry against the admin's
+    catalog by its map key and this backend cannot mint a per-session identity
+    element for any of them (:func:`_mcp_registry_mode`). So it withholds every
+    element the mount would otherwise produce, for every agent alike, and there
+    is no per-session edit that lifts it.
+
+    It is therefore a SKIP-not-abort verdict, unlike :class:`NativeMountWithholding`
+    (a per-server restriction the session's owner can lift) and
+    :class:`NativeSettingsUnreadable` (a file that fails closed): the session
+    composes without the element and runs, and a search agent's ``skill_search``
+    degrades to ``identity_unattested`` rather than killing the whole session.
+    Deliberately NOT a ``ValueError`` subclass, so the raise site tells it apart
+    from the two fail-the-session verdicts by type alone.
+    """
+
+    def explain(self, outcome: str) -> str:
+        """One sentence for a log line: why the native element is withheld."""
+        return (
+            "this install is registry-governed, so no Kiro Crew server carries a"
+            f" per-session identity element and {outcome} is unavailable here; the"
+            " session runs without it rather than failing"
+        )
+
+
 def native_settings_sources(work_dir: str | Path | None) -> list[NativeSettingsSource]:
     """The settings files kiro-cli enforces beside the agent spec, global first.
 
@@ -1597,16 +1626,18 @@ class NativeControlPlaneMount(NamedTuple):
     identity-bound server the spec grants whose element it did NOT produce
     because a declaration keeps the server native, that declaration's
     :class:`NativeMountWithholding` -- or, when a settings file could not be read
-    safely, the :class:`NativeSettingsUnreadable` that withheld every element. A
-    server in neither was not granted, not declared, or already in the array
-    with the files allowing it. Both come from the one read of the settings
-    files the mount performs, so a caller that refuses a session on ``withheld``
-    refuses it for the reason the array was built on, never for what the files
-    say a moment later.
+    safely, the :class:`NativeSettingsUnreadable` that withheld every element, or,
+    when the install is registry-governed, the :class:`NativeRegistryCeiling`
+    that withholds every element for every agent (a SKIP verdict, not a
+    fail-the-session one -- see that class). A server in none of these was not
+    granted, not declared, or already in the array with the files allowing it.
+    All come from the one read the mount performs, so a caller that refuses or
+    skips a session on ``withheld`` acts on the reason the array was built on,
+    never on what the files say a moment later.
     """
 
     elements: list[dict[str, Any]]
-    withheld: dict[str, NativeMountWithholding | NativeSettingsUnreadable]
+    withheld: dict[str, NativeMountWithholding | NativeSettingsUnreadable | NativeRegistryCeiling]
 
 
 def _named(value: Any) -> str:
@@ -1815,8 +1846,22 @@ def kiro_control_plane_servers(
     would be the window in which a toggle undone in between answers ``None``
     and the session falls back to a guard that names the wrong file.
     """
-    if not agent or _registry_mode():
+    if not agent:
         return NativeControlPlaneMount([], {})
+    if _registry_mode():
+        # Registry mode is a whole-install CEILING: kiro-cli resolves every
+        # managed entry against the admin's catalog by map key and no per-session
+        # identity element can be minted for any of them. The element is withheld
+        # for every agent alike, and nothing a session's owner can edit lifts it.
+        # Report it as a ceiling withholding so the session-start guard SKIPS the
+        # element for a search agent rather than aborting the whole session over
+        # a tool that could never bind here (the element's absence degrades
+        # skill_search to identity_unattested, which is the governed trade-off,
+        # not a broken session). The set is the whole population this function
+        # mounts, so a search agent's kirocrew-core is named among it.
+        ceiling = NativeRegistryCeiling()
+        governed = (*IDENTITY_BOUND_SERVERS, *builtin_app_identity_launches())
+        return NativeControlPlaneMount([], {name: ceiling for name in governed})
     spec = spec_override if spec_override is not None else _agent_spec_for(agent, work_dir)
     if not isinstance(spec, dict) or not isinstance(spec.get("mcpServers"), dict):
         return NativeControlPlaneMount([], {})
@@ -1840,7 +1885,9 @@ def kiro_control_plane_servers(
         unreadable = (*IDENTITY_BOUND_SERVERS, *builtin_app_identity_launches())
         return NativeControlPlaneMount([], {name: exc for name in unreadable})
     out: list[dict[str, Any]] = []
-    withheld_by_name: dict[str, NativeMountWithholding | NativeSettingsUnreadable] = {}
+    withheld_by_name: dict[
+        str, NativeMountWithholding | NativeSettingsUnreadable | NativeRegistryCeiling
+    ] = {}
     # Crew's managed servers first, in their established order, then the builtin
     # app servers that run Crew's own code (see builtin_app_identity_launches).
     # Each carries the launch it must be re-derived from and, for an app server,

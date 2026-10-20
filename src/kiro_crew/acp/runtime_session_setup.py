@@ -34,6 +34,7 @@ from kiro_crew.acp.mcp_ref_guard import warn_remote_header_secret_refs, warn_unr
 from kiro_crew.acp.runtime_start import _SESSION_NEW_TIMEOUT, _resolve_start_collect_timeout
 from kiro_crew.acp.session_handle import AcpRuntimeError, AcpSessionHandle
 from kiro_crew.acp.session_mcp import (
+    NativeRegistryCeiling,
     agent_spec_snapshot,
     session_mcp_disabled_tools,
     session_mcp_server_is_disabled,
@@ -738,8 +739,9 @@ async def _unpooled_control_planes(
             and name in projection.search_agents
             and not any(entry.get("name") == "kirocrew-core" for entry in mount.elements)
         ):
-            # The mount did not produce the element itself: a settings file
-            # withheld it, or a broker stub already in ``entries`` pre-empted
+            # The mount did not produce the element itself: the install is
+            # registry-governed (a ceiling no session edit lifts), or a settings
+            # file withheld it, or a broker stub already in ``entries`` pre-empted
             # it (the mount emits no element for a name the array carries),
             # or nothing grants it. The mount judged the files as they are
             # now -- the projection judged the spec at spawn; the dashboard's
@@ -749,17 +751,32 @@ async def _unpooled_control_planes(
             # the array, from the same read. Asking the files again here
             # would open the window in which a toggle undone in between
             # answers "allowed" and this session falls to the generic guard
-            # below, naming the wrong file. A withheld element refuses THIS
-            # session with the sentence that names the file and the way
-            # back; the spawn and every other agent's sessions stand.
-            # Refusing is the only honest answer: the view already dropped
-            # this agent's skill resources on the element's promise, and
-            # without the element kirocrew-core mounts natively, carries no
-            # identity and answers identity_unattested to every skill_search.
+            # below, naming the wrong file.
+            #
+            # A REGISTRY-CEILING verdict is a SKIP, not a refusal: under
+            # registry mode no agent's kirocrew-core can carry a per-session
+            # identity element, so aborting the session over a tool that could
+            # never bind on this install would kill every chat on a governed
+            # host. The session composes without the element and runs; the view
+            # already dropped this agent's skill resources on the element's
+            # promise, so skill_search degrades to identity_unattested -- the
+            # governed trade-off, not a broken session.
+            #
+            # A settings-file / spec restriction is different: it is specific to
+            # this session's owner and lifted by a named edit, so it still
+            # refuses THIS session with the sentence that names the file and the
+            # way back; the spawn and every other agent's sessions stand.
             withheld = mount.withheld.get("kirocrew-core")
-            if withheld is not None:
+            if isinstance(withheld, NativeRegistryCeiling):
+                logger.warning(
+                    "session MCP: agent %r is a skill-search agent but %s; mounting"
+                    " none and letting the session run without skill_search",
+                    name,
+                    withheld.explain("skill search"),
+                )
+            elif withheld is not None:
                 raise AcpRuntimeError(f"Agent {name!r}: {withheld.explain('skill search')}")
-            if not any(entry.get("name") == "kirocrew-core" for entry in entries):
+            elif not any(entry.get("name") == "kirocrew-core" for entry in entries):
                 raise AcpRuntimeError(
                     "Cannot bind skill_search to this session without losing native MCP "
                     "restrictions. Check the agent's kirocrew-core server configuration."

@@ -400,6 +400,62 @@ async def test_settings_that_cannot_be_read_refuse_the_search_agents_sessions_by
 
 
 @pytest.mark.asyncio
+async def test_registry_mode_skips_the_element_and_starts_the_search_agents_session(
+    tree, monkeypatch
+):
+    """A registry-governed install withholds every element but must not kill the session.
+
+    Under registry mode kiro-cli resolves each managed server against the admin's
+    catalog and this backend can mint no per-session identity element for any of
+    them, so the mount produces nothing. The projection still marks the agent a
+    search agent (its spec grants skill_search), so the session-start guard meets
+    a search agent with no element. It must SKIP the element and let the session
+    run -- skill_search degrades to identity_unattested, the governed trade-off --
+    rather than aborting every session on the host with the generic
+    "Cannot bind skill_search ... server configuration" guard.
+    """
+    monkeypatch.setattr(session_mcp, "_registry_mode", lambda: True)
+    from test_acp_runtime import _make_runtime
+
+    prepared = projection.prepare_native_skill_projection(tree.project)
+    assert prepared.search_agents == {"kirocrew"} and prepared.errors == {}
+    mount = _mount(prepared, tree)
+    assert mount.elements == []
+    verdict = mount.withheld.get("kirocrew-core")
+    assert isinstance(verdict, session_mcp.NativeRegistryCeiling)
+    assert "registry-governed" in verdict.explain("skill search")
+    runtime, _, _ = _make_runtime()
+    runtime._native_skill_projection = prepared
+    # The start guard neither raises nor adds an element: the session composes
+    # and runs without skill_search rather than failing to compose at all.
+    servers = await runtime._unpooled_control_planes([], "kirocrew", tree.project)
+    assert servers == []
+
+
+@pytest.mark.asyncio
+async def test_a_search_agent_with_nothing_granting_the_element_still_reaches_the_guard(
+    tree, monkeypatch
+):
+    """The generic guard is unchanged where it is the honest answer: a real misconfig.
+
+    Registry mode is the one state the skip is for. Outside it, a search agent
+    whose kirocrew-core the mount neither produced nor withheld with a reason,
+    and that no broker stub carries, is a genuinely broken configuration, and the
+    guard that names it must still fire. The registry-ceiling skip narrows the
+    abort to exactly that ceiling case; it does not remove the guard.
+    """
+    monkeypatch.setattr(
+        session_mcp,
+        "kiro_control_plane_servers",
+        lambda *a, **k: session_mcp.NativeControlPlaneMount([], {}),
+    )
+    prepared = projection.prepare_native_skill_projection(tree.project)
+    assert prepared.search_agents == {"kirocrew"}
+    message = await _session_refusal(prepared, tree)
+    assert "Cannot bind skill_search" in message and "server configuration" in message
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("scope", ["global", "project"])
 @pytest.mark.parametrize(
     "content",

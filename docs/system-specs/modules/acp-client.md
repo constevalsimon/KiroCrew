@@ -379,7 +379,18 @@ view fails as `AcpRuntimeError` carrying the projection's sentence, the error th
 provider's startup paths translate; a session refused for a
 settings file names the file instead of that guard, and the guard remains for
 what it was written for: an element neither granted nor pre-empted while the
-files allow it.
+files allow it. One verdict the mount returns is NOT a refusal at all: under
+registry mode (`_mcp_registry_mode`, the whole-install `registry` access ceiling)
+no agent's `kirocrew-core` can carry a per-session identity element, because
+kiro-cli resolves each managed entry against the admin's catalog by map key, so
+the mount withholds every element for every agent and names each with a
+`NativeRegistryCeiling`. For a projected search agent that verdict is a SKIP: the
+session-start guard logs it and composes without the element rather than aborting
+every chat on a governed host, and `skill_search` degrades to
+`identity_unattested` -- the governed trade-off, not a dead session. The generic
+"Cannot bind skill_search ... server configuration" abort is thereby narrowed to
+its real case, a genuinely misconfigured spec with the element neither granted
+nor withheld with a reason and no stub carrying it.
 
 The workspace overlay owns `chat.disableInheritingDefaultResources=true` while
 Crew supplies discovery. Only literal JSON `true` in the original native setting
