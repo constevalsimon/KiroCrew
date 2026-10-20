@@ -701,6 +701,7 @@ _OWNERS = (
     "kiro_crew.cli_commands_security",
     "kiro_crew.cli_commands_eval",
     "kiro_crew.cli_commands_learn",
+    "kiro_crew.cli_commands_session",
 )
 for _owner in _OWNERS:
     importlib.import_module(_owner)

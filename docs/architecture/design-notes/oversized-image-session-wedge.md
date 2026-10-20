@@ -48,15 +48,36 @@ carry a downscale step for this reason
 
 ## Recovery
 
-Dry run first -- it changes nothing and prints what it would rewrite:
+There are three ways to reach the same repair, in order of how most users will
+hit it:
+
+**From the dashboard (one click).** When a turn is refused for this reason the
+error card detects the provider's many-image dimension rejection (the
+`image_dimension_wedge` tag, classified from the raw error frame in
+`acp/transport_errors.py`) and offers **Repair images and resume** instead of
+Resume. Pressing it `POST`s to `/api/chat/slots/{slot}/repair-images`, which
+stops the slot's kiro-cli process (releasing the transcript lock), runs the
+repair below on the now-idle transcript with its `.pre-image-repair.bak`
+sidecar, re-arms the resume spawn, and re-issues the interrupted turn. No turns
+are lost -- unlike `reset-conversation`, which starts a fresh conversation.
+
+**From a terminal.** `kirocrew session repair-images <session-id>` is the same
+repair for a session that is not open in the dashboard, or when the dashboard is
+unreachable. It resolves the id to `~/.kiro/sessions/cli/<session-id>.jsonl`
+(a path is also accepted) and shares the module's dry-run / apply / backup /
+liveness policy:
+
+```bash
+# Dry run first -- it changes nothing and prints what it would rewrite:
+kirocrew session repair-images <session-id>
+# Then, with the session ENDED (not merely idle -- see below):
+kirocrew session repair-images --apply <session-id>
+```
+
+**Directly, via the module** -- the same code the two surfaces call:
 
 ```bash
 python -m kiro_crew.session_image_repair ~/.kiro/sessions/cli/<session-id>.jsonl
-```
-
-Then, with the session ENDED (not merely idle -- see below):
-
-```bash
 python -m kiro_crew.session_image_repair --apply ~/.kiro/sessions/cli/<session-id>.jsonl
 ```
 
@@ -87,5 +108,10 @@ Notes on what it does and does not do:
   tool payload that merely looks like a block is the acceptable direction.
 - An image with no compliant rendition becomes a text marker rather than being
   left in place. Losing one image beats losing every later turn.
-- It is not a sweeper and not a `kirocrew` subcommand, on purpose: it rewrites
-  another tool's data directory, so it stays an explicit operator action.
+- It is not a sweeper: nothing rewrites another tool's data directory on its own
+  schedule. The dashboard button and the `kirocrew session repair-images`
+  subcommand are each an EXPLICIT operator action -- a human pressing or typing
+  "repair this session" -- which is exactly the explicit operator action this
+  constraint asks for, so wiring the module behind them does not weaken it. (The
+  earlier "not a `kirocrew` subcommand, on purpose" line was aimed at an
+  automatic sweeper, not at an operator-invoked command.)

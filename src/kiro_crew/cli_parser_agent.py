@@ -494,6 +494,51 @@ Examples:
     )
 
 
+def register_session_parser(sub: _Commands) -> None:
+    sess_parser = cli_help.add_command(
+        sub,
+        "session",
+        epilog="""
+Examples:
+  kirocrew session repair-images <session-id>
+  kirocrew session repair-images <session-id> --apply
+  kirocrew session repair-images ./path/to/transcript.jsonl --apply
+""",
+        formatter_class=_fmt,
+    )
+    sess_sub = sess_parser.add_subparsers(dest="session_action")
+    repair = sess_sub.add_parser(
+        "repair-images",
+        help=(
+            "Downscale oversized images in a kiro-cli session transcript so the "
+            "provider's 2000px many-image cap stops wedging the session"
+        ),
+    )
+    repair.add_argument(
+        "session",
+        nargs="+",
+        help=(
+            "Session id(s) under the kiro-cli sessions directory, or a path to a "
+            "transcript .jsonl/.json file"
+        ),
+    )
+    repair.add_argument(
+        "--apply",
+        action="store_true",
+        help="Rewrite the transcript(s) (default is a dry run that changes nothing)",
+    )
+    repair.add_argument(
+        "--allow-live",
+        action="store_true",
+        help=(
+            "Repair even when a running kiro-cli holds the transcript (refused by "
+            "default; an append during the write would be lost). Prefer closing "
+            "the session, or using the dashboard error card's Repair action, which "
+            "stops the process first."
+        ),
+    )
+
+
 def register_artifact_parser(sub: _Commands) -> None:
     art_parser = cli_help.add_command(
         sub,

@@ -19,6 +19,7 @@ from kiro_crew.acp.client import (
     PROVIDER_ERROR_CREDENTIAL_PROPAGATION,
     PROVIDER_ERROR_HTTP_5XX,
     PROVIDER_ERROR_MALFORMED_REQUEST,
+    PROVIDER_ERROR_MANY_IMAGE_DIMENSION,
     PROVIDER_ERROR_MODEL_UNAVAILABLE,
     PROVIDER_ERROR_THROTTLE,
     PROVIDER_ERROR_UNKNOWN,
@@ -35,6 +36,14 @@ CASES = [
     ("5-hour limit reached - resets 3pm", PROVIDER_ERROR_USAGE_LIMIT),
     ("You've reached your weekly limit. It resets Monday at 9am.", PROVIDER_ERROR_USAGE_LIMIT),
     ("Improperly formed request: field x", PROVIDER_ERROR_MALFORMED_REQUEST),
+    # The provider's many-image 2000px dimension cap: terminal (an oversized
+    # image already in history is re-sent identically), and distinct from
+    # malformed-request so the dashboard can offer in-place image repair.
+    (
+        "messages.30.content.1.image.source.base64.data: At least one of the image "
+        "dimensions exceed max allowed size for many-image requests: 2000 pixels",
+        PROVIDER_ERROR_MANY_IMAGE_DIMENSION,
+    ),
     ("The model 'claude-x' is not available", PROVIDER_ERROR_MODEL_UNAVAILABLE),
     ("The model you've selected is temporarily unavailable", PROVIDER_ERROR_MODEL_UNAVAILABLE),
     ("ThrottlingException: Rate exceeded", PROVIDER_ERROR_THROTTLE),

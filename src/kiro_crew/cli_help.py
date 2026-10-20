@@ -67,6 +67,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("cron", "Manage scheduled jobs"),
             ("spawn", "Manage background subagents"),
             ("computer", "Computer-use (desktop automation) diagnostics"),
+            ("session", "Maintain chat session transcripts (e.g. repair oversized images)"),
         ),
     ),
     (

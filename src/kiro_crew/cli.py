@@ -526,6 +526,7 @@ def main() -> None:
     cli_parser_agent.register_learn_parser(sub)
     cli_parser_agent.register_artifact_parser(sub)
     cli_parser_agent.register_memory_parser(sub)
+    cli_parser_agent.register_session_parser(sub)
     cli_parser_agent.register_agent_parser(sub)
     cli_parser_agent.register_workspace_parser(sub)
     cli_parser_agent.register_app_parser(sub)
@@ -851,6 +852,10 @@ def main() -> None:
         from kiro_crew.cli_commands import _memory_cmd
 
         _memory_cmd(args)
+    elif args.command == "session":
+        from kiro_crew.cli_commands import _session_cmd
+
+        _session_cmd(args)
     elif args.command == "mcp-cron":
         from kiro_crew.mcp_cron import run_mcp_server as run_mcp_cron_server
 
