@@ -752,34 +752,58 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
     if (stageUrl !== null) return
     setHeld(prev => (prev.url === url && prev.grant === grantKey ? prev : { url, grant: grantKey }))
   }, [stageUrl, url, grantKey])
-  /** The URL of a document that was already loaded when it moved on screen, so the
-   *  "drawn" bookkeeping below does not wait for a `load` that will not fire again. */
-  const preloadedRef = useRef<string | null>(null)
+  /** What the off-screen frame had already shown when it moved on screen, so the
+   *  "drawn" bookkeeping below does not wait for a `load` or a beacon that will not
+   *  come again. Recorded as observed: a frame shown because the wait ran out has
+   *  NOT reported ready, and a Keep that names a page nobody saw come up is wrong. */
+  const preloadedRef = useRef<{ url: string; loaded: boolean; ready: boolean } | null>(null)
   const stageRef = useRef<HTMLIFrameElement | null>(null)
+  /** When the current run of off-screen documents began. A read that lands while one
+   *  is loading rebuilds it under a new url, and the wait is measured from the first,
+   *  or writes arriving more often than the wait would keep the old document up for as
+   *  long as they last. */
+  const stagingSinceRef = useRef<number | null>(null)
   useEffect(() => {
-    if (stageUrl === null) return
+    if (stageUrl === null) {
+      stagingSinceRef.current = null
+      return
+    }
+    if (stagingSinceRef.current === null) stagingSinceRef.current = Date.now()
+    let loaded = false
+    let ready = false
     const promote = () => {
-      preloadedRef.current = stageUrl
+      preloadedRef.current = { url: stageUrl, loaded, ready }
       setHeld({ url: stageUrl, grant: grantKeyRef.current })
     }
     // Not coming up in time is not a reason to keep the old document for good: it
     // would go on showing numbers that are behind with nothing saying so, and a page
     // whose script threw was shown as it was before this existed.
-    const timer = window.setTimeout(promote, READY_TIMEOUT_MS)
+    const waited = Date.now() - stagingSinceRef.current
+    const timer = window.setTimeout(promote, Math.max(0, READY_TIMEOUT_MS - waited))
     const el = stageRef.current
+    const onLoad = () => {
+      loaded = true
+      // A page without script sends no beacon, so its load is all there is to wait on.
+      if (!runsScript) {
+        ready = true
+        promote()
+      }
+    }
     const onMessage = (event: MessageEvent) => {
       const win = stageRef.current?.contentWindow
       if (!win || event.source !== win) return
       const payload = event.data as { type?: unknown } | null
-      if (payload && payload.type === READY_MESSAGE_TYPE) promote()
+      if (payload && payload.type === READY_MESSAGE_TYPE) {
+        ready = true
+        promote()
+      }
     }
+    el?.addEventListener('load', onLoad)
     if (runsScript) window.addEventListener('message', onMessage)
-    // A page without script sends no beacon, so its load is all there is to wait on.
-    else el?.addEventListener('load', promote)
     return () => {
       window.clearTimeout(timer)
       window.removeEventListener('message', onMessage)
-      el?.removeEventListener('load', promote)
+      el?.removeEventListener('load', onLoad)
     }
   }, [stageUrl, runsScript])
 
@@ -817,9 +841,9 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
   drawnUrlRef.current = url
   const [drawn, setDrawn] = useState<{ url: string | null; loaded: boolean; ready: boolean }>({ url: null, loaded: false, ready: false })
   useEffect(() => {
-    // A document that was loaded off screen is drawn the moment it is shown.
-    const loadedAlready = url !== null && preloadedRef.current === url
-    setDrawn({ url, loaded: loadedAlready, ready: loadedAlready })
+    // A document loaded off screen brings what it already reported with it.
+    const pre = url !== null && preloadedRef.current?.url === url ? preloadedRef.current : null
+    setDrawn({ url, loaded: pre?.loaded ?? false, ready: pre?.ready ?? false })
   }, [url])
   const onFrameLoad = useCallback(() => {
     // STEP 3 (#20952): the iframe loaded the minted document -- the third and last
@@ -1340,7 +1364,7 @@ export default function CrewDynamicDashboard({ target, displayName, avatar, onAc
             key={`frame-${grantKey}-${stageUrl}`}
             ref={stageRef}
             src={stageUrl}
-            sandbox={grantKey}
+            sandbox={crewDashboardSandbox(mayRunScript && shown.scripts)}
             aria-hidden
             tabIndex={-1}
             className="absolute inset-x-0 bottom-0 h-full w-full opacity-0 pointer-events-none border-none"

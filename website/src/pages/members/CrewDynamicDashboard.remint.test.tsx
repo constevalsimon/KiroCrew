@@ -158,6 +158,35 @@ describe('a re-minted document', () => {
     expect(visible()).toBe(next)
   })
 
+  it('counts the wait from the first off-screen document, however often reads rebuild it', async () => {
+    // Every read that lands while a document is loading rebuilds it under a new url.
+    // If each one restarted the wait, writes arriving more often than the wait would
+    // keep the old document on screen, with its old numbers, for as long as they last.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.spyOn(api, 'memberDashboard')
+      .mockResolvedValueOnce(page('first'))
+      .mockResolvedValueOnce(page('second, longer'))
+      .mockResolvedValue(page('third, longer still'))
+    const { queryClient } = mount()
+    await screen.findByTestId('crew-dashboard-iframe')
+    await queryClient.invalidateQueries({ queryKey: DASHBOARD_KEY })
+    const second = await screen.findByTestId('crew-dashboard-swap')
+    const secondSrc = second.getAttribute('src')
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(READY_TIMEOUT_MS - 2000)
+    })
+    await queryClient.invalidateQueries({ queryKey: DASHBOARD_KEY })
+    // The newer read replaced the document that was loading.
+    await waitFor(() => expect(screen.getByTestId('crew-dashboard-swap').getAttribute('src')).not.toBe(secondSrc))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2500)
+    })
+
+    expect(offscreen()).toBeNull()
+  })
+
   it('replaces the open frame on load when the page runs no script', async () => {
     // A page without script cannot send a beacon; its load event is all there is.
     vi.spyOn(api, 'memberDashboard')
@@ -206,5 +235,63 @@ describe('a re-minted document', () => {
     mount()
     await screen.findByTestId('crew-dashboard-iframe')
     expect(offscreen()).toBeNull()
+  })
+})
+
+/**
+ * A KEEP NAMES A PAGE SOMEONE SAW COME UP.
+ *
+ * On a staged preview the Keep button is offered for the page that is mounted and drawn.
+ * A document shown because the wait ran out never said it came up -- its script may have
+ * thrown -- so being on screen is not being drawn.
+ */
+describe('a staged preview that is re-minted', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('is not offered for Keep when it was shown only because the wait ran out', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.spyOn(api, 'memberDashboard')
+      .mockResolvedValueOnce(page('first', { staged_ms: 7 }))
+      .mockResolvedValue(page('second, longer', { staged_ms: 7 }))
+    const onPreviewLoaded = vi.fn()
+    const { queryClient } = renderWithProviders(
+      <CrewDynamicDashboard target={TARGET} displayName="Atlas" preview onPreviewLoaded={onPreviewLoaded} />,
+    )
+    const first = await screen.findByTestId('crew-dashboard-iframe')
+    const firstWindow = stubWindow(first).stub
+    // The first document loads and reports ready: that one IS offered.
+    // Repeated until it lands: the frame's drawn state is reset by an effect that may
+    // not have run yet when the first report arrives, and a report is idempotent.
+    await waitFor(() => {
+      act(() => {
+        first.dispatchEvent(new Event('load'))
+        beacon(firstWindow, false)
+      })
+      expect(onPreviewLoaded).toHaveBeenLastCalledWith(7)
+    })
+
+    await queryClient.invalidateQueries({ queryKey: DASHBOARD_KEY })
+    const next = await screen.findByTestId('crew-dashboard-swap')
+    const nextWindow = stubWindow(next).stub
+    // It loads, but its script never reports.
+    act(() => {
+      next.dispatchEvent(new Event('load'))
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(READY_TIMEOUT_MS + 100)
+    })
+    expect(offscreen()).toBeNull()
+    await waitFor(() => expect(onPreviewLoaded).toHaveBeenLastCalledWith(0))
+
+    // Reporting late still counts: the page did come up.
+    await waitFor(() => {
+      act(() => beacon(nextWindow, false))
+      expect(onPreviewLoaded).toHaveBeenLastCalledWith(7)
+    })
   })
 })
