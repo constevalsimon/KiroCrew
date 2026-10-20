@@ -43,7 +43,6 @@ from typing import Any, Awaitable, Callable
 
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.mcp_gateway.pool import PoolKey
-from kiro_crew.metrics.provider import get_recorder
 
 logger = logging.getLogger(__name__)
 
@@ -138,11 +137,10 @@ class HotKeyStore:
             else:
                 self._misses += 1
             self._dirty = True
-        # OTEL metric: warm-pool acquire counter (hit vs miss).
-        get_recorder().counter(
-            "kirocrew.mcp.warm_pool.acquire",
-            attrs={"result": "hit" if hit else "miss"},
-        )
+        # The OTEL counter for this outcome (kirocrew.mcp.warm_pool.acquire) is
+        # emitted at the acquire point instead
+        # (daemon/diagnostics.py::_emit_backend_acquire_metric), because this
+        # store exists only when prewarming is enabled.
 
     def hit_stats(self) -> dict[str, int]:
         """Point-in-time warm-pool hit tally for the dashboard / tests.

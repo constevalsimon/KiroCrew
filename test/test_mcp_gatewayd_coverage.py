@@ -2399,7 +2399,8 @@ class TestMetricEmitters:
         names = [call.args[0] for call in rec.histogram.call_args_list]
         assert "kirocrew.mcp.lazy_load.duration" in names
         assert "kirocrew.mcp.backend.acquire.duration" in names
-        assert rec.counter.call_args.args[0] == "kirocrew.mcp.lazy_load.count"
+        counters = [call.args[0] for call in rec.counter.call_args_list]
+        assert counters == ["kirocrew.mcp.lazy_load.count", "kirocrew.mcp.warm_pool.acquire"]
 
     def test_telemetry_failure_never_breaks_the_hot_path(self, monkeypatch):
         monkeypatch.setattr(

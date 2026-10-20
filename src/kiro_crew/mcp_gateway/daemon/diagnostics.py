@@ -32,13 +32,24 @@ def _emit_backend_acquire_metric(acquire_ms: float, *, warm: bool) -> None:
     Shared by the ensure_backend + lazy-spawn paths and their unit tests so the
     metric name / attrs live in production, not duplicated in the test
     (tests must drive real production code).
+
+    Also counts ``kirocrew.mcp.warm_pool.acquire`` (``hit`` when the acquire
+    reused a live backend, ``miss`` when it spawned one). It used to be counted
+    only by the prewarm hot-key store, which exists only when ``prewarm_count``
+    is above 0 (default 0), so the counter never fired on a default install.
+    Counting here, once per acquired backend, works with prewarm on or off.
     """
     try:
-        facade.get_recorder().histogram(
+        rec = facade.get_recorder()
+        rec.histogram(
             "kirocrew.mcp.backend.acquire.duration",
             acquire_ms,
             unit="ms",
             attrs={"warm": warm},
+        )
+        rec.counter(
+            "kirocrew.mcp.warm_pool.acquire",
+            attrs={"result": "hit" if warm else "miss"},
         )
     except Exception:  # telemetry must never break the gateway hot path
         logger.debug("backend.acquire metric emit failed", exc_info=True)

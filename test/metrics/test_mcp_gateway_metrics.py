@@ -3,11 +3,11 @@
 Every test drives the REAL production emit path with a patched recorder and
 asserts the captured metric name + attributes:
 
-* ``kirocrew.mcp.warm_pool.acquire`` — via ``HotKeyStore.record_outcome``
+* ``kirocrew.mcp.warm_pool.acquire`` -- via ``gatewayd._emit_backend_acquire_metric``
 * ``kirocrew.mcp.backend.acquire.duration`` — via ``gatewayd._emit_backend_acquire_metric``
 * ``kirocrew.mcp.lazy_load.{count,duration}`` — via ``gatewayd._emit_lazy_load_metrics``
 
-The metric names/attrs live in production (prewarm.py / daemon/diagnostics.py), so a
+The metric names/attrs live in production (daemon/diagnostics.py), so a
 rename, attribute change, or removed emit fails these tests rather than passing
 green against logic the test wrote itself.
 """
@@ -32,42 +32,49 @@ class _CapturingRecorder:
 
 
 # ---------------------------------------------------------------------------
-# kirocrew.mcp.warm_pool.acquire — prewarm.HotKeyStore.record_outcome
+# kirocrew.mcp.warm_pool.acquire -- daemon/diagnostics._emit_backend_acquire_metric
 # ---------------------------------------------------------------------------
 
 
 class TestWarmPoolAcquireCounter:
-    """record_outcome emits a hit/miss counter (drives production)."""
+    """The acquire point counts hit/miss, with or without the prewarm store."""
 
-    def _make_store(self, tmp_path):
-        from kiro_crew.mcp_gateway.prewarm import HotKeyStore
+    def test_warm_acquire_counts_hit(self):
+        from kiro_crew.mcp_gateway.gatewayd import _emit_backend_acquire_metric
 
-        return HotKeyStore(tmp_path / "hot-keys.json")
-
-    def test_hit_emits_counter(self, tmp_path):
-        store = self._make_store(tmp_path)
         rec = _CapturingRecorder()
-        # prewarm imports get_recorder at module top-level, so patch the
-        # consumer binding, not the definition module.
-        with patch("kiro_crew.mcp_gateway.prewarm.get_recorder", return_value=rec):
-            store.record_outcome(hit=True)
+        with patch("kiro_crew.mcp_gateway.gatewayd.get_recorder", return_value=rec):
+            _emit_backend_acquire_metric(3.0, warm=True)
         assert rec.counters == [("kirocrew.mcp.warm_pool.acquire", {"result": "hit"})]
 
-    def test_miss_emits_counter(self, tmp_path):
-        store = self._make_store(tmp_path)
+    def test_spawning_acquire_counts_miss(self):
+        from kiro_crew.mcp_gateway.gatewayd import _emit_backend_acquire_metric
+
         rec = _CapturingRecorder()
-        with patch("kiro_crew.mcp_gateway.prewarm.get_recorder", return_value=rec):
-            store.record_outcome(hit=False)
+        with patch("kiro_crew.mcp_gateway.gatewayd.get_recorder", return_value=rec):
+            _emit_backend_acquire_metric(300.0, warm=False)
         assert rec.counters == [("kirocrew.mcp.warm_pool.acquire", {"result": "miss"})]
 
-    def test_multiple_calls_accumulate(self, tmp_path):
-        store = self._make_store(tmp_path)
+    def test_lazy_path_counts_once(self):
+        from kiro_crew.mcp_gateway.gatewayd import _emit_lazy_load_metrics
+
         rec = _CapturingRecorder()
-        with patch("kiro_crew.mcp_gateway.prewarm.get_recorder", return_value=rec):
+        with patch("kiro_crew.mcp_gateway.gatewayd.get_recorder", return_value=rec):
+            _emit_lazy_load_metrics(5.0, warm=True)
+        assert [c for c in rec.counters if c[0] == "kirocrew.mcp.warm_pool.acquire"] == [
+            ("kirocrew.mcp.warm_pool.acquire", {"result": "hit"})
+        ]
+
+    def test_hot_key_tally_no_longer_emits(self, tmp_path):
+        """The prewarm store keeps its tally but must not count the metric twice."""
+        from kiro_crew.mcp_gateway.prewarm import HotKeyStore
+
+        store = HotKeyStore(tmp_path / "hot-keys.json")
+        rec = _CapturingRecorder()
+        with patch("kiro_crew.metrics.provider.get_recorder", return_value=rec):
             store.record_outcome(hit=True)
-            store.record_outcome(hit=False)
-            store.record_outcome(hit=True)
-        assert [attrs["result"] for _, attrs in rec.counters] == ["hit", "miss", "hit"]
+        assert rec.counters == []
+        assert store.hit_stats()["warm_pool_hits"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -114,8 +121,11 @@ class TestLazyLoadMetrics:
         with patch("kiro_crew.mcp_gateway.gatewayd.get_recorder", return_value=rec):
             _emit_lazy_load_metrics(250.0, warm=False)
 
-        # Counter: lazy_load.count
-        assert rec.counters == [("kirocrew.mcp.lazy_load.count", {"transport": "stdio"})]
+        # Counters: lazy_load.count, then the acquire's warm-pool outcome
+        assert rec.counters == [
+            ("kirocrew.mcp.lazy_load.count", {"transport": "stdio"}),
+            ("kirocrew.mcp.warm_pool.acquire", {"result": "miss"}),
+        ]
 
         # Histograms: lazy_load.duration + backend.acquire.duration
         by_name = {h[0]: h for h in rec.histograms}

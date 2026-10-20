@@ -66,6 +66,7 @@ from kiro_crew.platform.security_authority import PolicyAuthority, assert_securi
 
 if TYPE_CHECKING:
     from kiro_crew.config.loader import KiroCrewConfig
+    from kiro_crew.platform.interfaces_runtime import TelemetryProvider
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,38 @@ def boot_platform(cfg: "KiroCrewConfig") -> PlatformContext:
         ctx = bootstrap_context(cfg)
         _BOOTED = True
         return ctx
+
+
+def compose_telemetry_provider(cfg: "KiroCrewConfig") -> "TelemetryProvider":
+    """Compose ONLY the edition's telemetry provider, installing no context.
+
+    For a Kiro Crew process that deliberately does not boot the platform -- the
+    MCP gateway daemon -- but must still send its metrics where the edition's
+    collector is. Without it such a process resolves OTLP destinations through
+    ``current_context()``, which on a non-standalone profile raises
+    ``PlatformCompositionError`` (nothing was installed), so its metrics stayed
+    in the local sink and never reached the edition's collector.
+
+    Nothing is installed: ``set_context`` is not called, so every other
+    ``current_context()`` reader in the calling process keeps exactly the
+    behavior it had (fail-closed on a non-standalone profile). Discovery still
+    runs the fleet admission gate before any companion code loads, and the
+    contract version is checked, so this composes only what boot itself would.
+
+    Raises ``PlatformCompositionError`` the same way boot does; the caller
+    decides what that means for it (the daemon degrades to local-only).
+    """
+    eps = plugin_entry_points()
+    profile = resolve_profile(cfg, entry_points=eps)
+    if profile == PROFILE_STANDALONE:
+        return DefaultTelemetryProvider()
+    companion = discover_companion_context(profile, cfg, entry_points=eps)
+    if companion is None:
+        raise PlatformCompositionError(
+            f"profile={profile!r} resolved no companion context; no telemetry provider"
+        )
+    _assert_contract(companion)
+    return companion.telemetry
 
 
 def _reset_boot_state() -> None:
